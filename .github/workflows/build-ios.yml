@@ -133,12 +133,23 @@ jobs:
 
       - name: Build iOS arm64 xcframeworks
         working-directory: ffmpeg-kit-next
+        env:
+          CI: "true"
         run: |
           set -euo pipefail
           chmod +x ./ios.sh
-          mapfile -t FLAGS < "$GITHUB_WORKSPACE/ios-flags.txt"
+          FLAGS=()
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ""|\#*) continue ;;
+            esac
+            FLAGS+=("$line")
+          done < "$GITHUB_WORKSPACE/ios-flags.txt"
+          echo "Invoking ios.sh with ${#FLAGS[@]} flags"
           ./ios.sh "${FLAGS[@]}"
+          echo "===== prebuilt tree ====="
           find prebuilt -maxdepth 3 -type d | sort
+          echo "===== disk after build ====="
           df -h /
 
       - name: Package dist for apps
