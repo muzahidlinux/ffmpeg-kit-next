@@ -94,7 +94,7 @@ jobs:
               EXTRA+=(
                 --enable-lib-openssl --enable-lib-dav1d --enable-lib-opus
                 --enable-lib-lame --enable-lib-libvpx --enable-lib-libwebp
-                --enable-lib-soxr --enable-lib-srt
+                --enable-lib-srt
               )
               ;;
             audio-video)
