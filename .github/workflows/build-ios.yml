@@ -1,0 +1,176 @@
+name: Build FFmpegKitNext iOS Device
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpegkit_ref:
+        description: "ffmpeg-kit-next git ref (branch, tag, or SHA)"
+        required: true
+        default: "v9.0.0"
+      variant:
+        description: "Library set"
+        type: choice
+        default: "https"
+        options:
+          - min
+          - https
+          - audio-video
+          - gpl
+      ios_min:
+        description: "Minimum iOS deployment target"
+        required: true
+        default: "15.0"
+      xcode_version:
+        description: "Xcode major (26 required by current ffmpeg-kit-next)"
+        required: true
+        default: "26"
+
+concurrency:
+  group: ffmpegkit-ios-device-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ios-arm64:
+    name: iOS arm64 (${{ inputs.variant }})
+    runs-on: macos-26
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Select Xcode ${{ inputs.xcode_version }}
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "${{ inputs.xcode_version }}"
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          df -h /
+
+      - name: Install host build tools
+        run: |
+          set -euo pipefail
+          brew update
+          brew install autoconf automake libtool pkg-config nasm yasm \
+            cmake meson ninja gnu-sed gettext doxygen wget xz
+          echo "SED=$(brew --prefix gnu-sed)/libexec/gnubin/sed" >> "$GITHUB_ENV"
+          echo "$(brew --prefix gnu-sed)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout ffmpeg-kit-next
+        uses: actions/checkout@v4
+        with:
+          repository: arthenica/ffmpeg-kit-next
+          ref: ${{ inputs.ffmpegkit_ref }}
+          path: ffmpeg-kit-next
+          fetch-depth: 1
+
+      - name: Compose ios.sh flags
+        run: |
+          set -euo pipefail
+          ARCH_FLAGS=(
+            --disable-arch-arm64-simulator
+            --disable-arch-arm64-mac-catalyst
+            --disable-arch-arm64e
+            --disable-arch-x86-64
+            --disable-arch-x86-64-mac-catalyst
+          )
+          IOS_LIBS=(
+            --enable-lib-ios-videotoolbox
+            --enable-lib-ios-audiotoolbox
+            --enable-lib-ios-avfoundation
+            --enable-lib-ios-bzip2
+            --enable-lib-ios-zlib
+            --enable-lib-ios-libiconv
+          )
+          EXTRA=()
+          case "${{ inputs.variant }}" in
+            min) ;;
+            https)
+              EXTRA+=(
+                --enable-lib-openssl --enable-lib-dav1d --enable-lib-opus
+                --enable-lib-lame --enable-lib-libvpx --enable-lib-libwebp
+                --enable-lib-soxr --enable-lib-srt
+              )
+              ;;
+            audio-video)
+              EXTRA+=(
+                --enable-lib-openssl --enable-lib-dav1d --enable-lib-opus
+                --enable-lib-lame --enable-lib-libvpx --enable-lib-libwebp
+                --enable-lib-soxr --enable-lib-srt --enable-lib-libvorbis
+                --enable-lib-libtheora --enable-lib-speex --enable-lib-opencore-amr
+                --enable-lib-libass --enable-lib-freetype --enable-lib-fribidi
+                --enable-lib-harfbuzz --enable-lib-fontconfig --enable-lib-libxml2
+                --enable-lib-zimg
+              )
+              ;;
+            gpl)
+              EXTRA+=(
+                --enable-gpl --enable-lib-openssl --enable-lib-dav1d
+                --enable-lib-opus --enable-lib-lame --enable-lib-libvpx
+                --enable-lib-libwebp --enable-lib-soxr --enable-lib-srt
+                --enable-lib-libvorbis --enable-lib-libtheora --enable-lib-speex
+                --enable-lib-opencore-amr --enable-lib-libass --enable-lib-freetype
+                --enable-lib-fribidi --enable-lib-harfbuzz --enable-lib-fontconfig
+                --enable-lib-libxml2 --enable-lib-zimg --enable-lib-x264
+                --enable-lib-x265 --enable-lib-xvidcore --enable-lib-libvidstab
+              )
+              ;;
+            *) echo "Unknown variant"; exit 1 ;;
+          esac
+          FLAGS=(
+            --xcframework --spm
+            --target="${{ inputs.ios_min }}"
+            --jobs="$(sysctl -n hw.ncpu)"
+            "${ARCH_FLAGS[@]}" "${IOS_LIBS[@]}" "${EXTRA[@]}"
+          )
+          printf '%s\n' "${FLAGS[@]}" > "$GITHUB_WORKSPACE/ios-flags.txt"
+          printf '  %s\n' "${FLAGS[@]}"
+
+      - name: Build iOS arm64 xcframeworks
+        working-directory: ffmpeg-kit-next
+        run: |
+          set -euo pipefail
+          chmod +x ./ios.sh
+          mapfile -t FLAGS < "$GITHUB_WORKSPACE/ios-flags.txt"
+          ./ios.sh "${FLAGS[@]}"
+          find prebuilt -maxdepth 3 -type d | sort
+          df -h /
+
+      - name: Package dist for apps
+        run: |
+          set -euo pipefail
+          SRC_ROOT="ffmpeg-kit-next/prebuilt"
+          DIST="dist/FFmpegKitNext-iOS"
+          mkdir -p "$DIST"
+          BUNDLE="$(find "$SRC_ROOT" -maxdepth 1 -type d -name 'bundle-apple-xcframework-ios-*' | head -n 1)"
+          if [[ -z "$BUNDLE" ]]; then
+            echo "No bundle-apple-xcframework-ios-* under $SRC_ROOT"
+            ls -la "$SRC_ROOT" || true
+            exit 1
+          fi
+          cp -R "$BUNDLE"/. "$DIST/"
+          if [[ -f ffmpeg-kit-next/build.log ]]; then
+            gzip -c ffmpeg-kit-next/build.log > dist/build.log.gz
+          fi
+
+      - name: Upload iOS xcframeworks
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpegkit-ios-device-${{ inputs.variant }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build.log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpegkit-ios-device-buildlog
+          path: ffmpeg-kit-next/build.log
+          if-no-files-found: ignore
+          retention-days: 14
